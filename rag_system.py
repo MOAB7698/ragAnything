@@ -626,37 +626,76 @@ async def create_rag(config: Config, embedding_service: EmbeddingService) -> RAG
             messages=messages, config=config, **kw
         )
 
-    # ── ساخت role_llm_funcs برای LightRAG جدید ───────────────────────
-    # LightRAG جدید (lightrag-hku) داخل lightrag_kwargs انتظار دارد
-    # یک dict به نام role_llm_funcs با چهار نقش بگیرد.
-    # اگر این dict نباشد، KeyError: 'role_llm_funcs' می‌دهد.
     role_llm_funcs = {
-        "extract": _llm,   # استخراج موجودیت و رابطه از اسناد
-        "keyword": _llm,   # استخراج کلیدواژه
-        "query":   _llm,   # پاسخ به سوال کاربر
-        "vlm":     _vision, # تحلیل تصویر
+        "extract": _llm,
+        "keyword": _llm,
+        "query":   _llm,
+        "vlm":     _vision,
     }
 
-    # lightrag_kwargs به RAGAnything پاس داده می‌شود و RAGAnything آن را به LightRAG constructor می‌دهد.
-    # llm_model_func باید اینجا باشد تا LightRAG بتواند LLM را initialize کند.
-    # role_llm_funcs را اینجا نمی‌گذاریم چون نسخه نصب‌شده LightRAG آن را در constructor نمی‌پذیرد.
+    # lightrag_kwargs: فقط پارامترهایی که LightRAG constructor می‌پذیرد
+    # role_llm_funcs اینجا نیست — بعد از init تزریق می‌شود
     lightrag_kwargs: Dict[str, Any] = {
         "llm_model_func": _llm,
         "chunk_token_size": config.llm_chunk_token_size,
         "chunk_overlap_token_size": config.llm_chunk_overlap_token_size,
     }
 
-    # اگر storage موجود باشد، LightRAG را مستقیم بارگذاری می‌کنیم
+    _logger = logging.getLogger(__name__)
     existing = config.working_dir.exists() and any(config.working_dir.iterdir())
 
-    _logger = logging.getLogger(__name__)
+    def _inject_role_llm_funcs(rag_instance: RAGAnything, lg_instance):
+        """
+        تزریق role_llm_funcs به lightrag.__dict__ و global_config هر modal processor.
+        این تابع هر بار که _ensure_lightrag_initialized اجرا می‌شود فراخوانی می‌شود
+        تا processorهای تازه‌ساخته‌شده هم تزریق بشوند.
+        """
+        if lg_instance is None:
+            return
+        # محاسبه مقدار نهایی role_llm_funcs
+        if hasattr(lg_instance, "_build_global_config"):
+            try:
+                _rlf = lg_instance._build_global_config().get("role_llm_funcs") or role_llm_funcs
+            except Exception:
+                _rlf = role_llm_funcs
+        else:
+            _rlf = role_llm_funcs
+        # تزریق به __dict__ (property ندارد setter)
+        lg_instance.__dict__["role_llm_funcs"] = _rlf
+        _logger.info(f"✅ role_llm_funcs → lightrag.__dict__: {list(_rlf.keys())}")
+        # تزریق به global_config هر modal processor (هر بار که از نو ساخته می‌شوند)
+        _cnt = 0
+        for _proc in (getattr(rag_instance, "modal_processors", None) or {}).values():
+            _gc = getattr(_proc, "global_config", None)
+            if isinstance(_gc, dict):
+                _gc["role_llm_funcs"] = _rlf
+                _cnt += 1
+        if _cnt:
+            _logger.info(f"✅ role_llm_funcs → {_cnt} modal processor global_configs")
+
+    def _patch_ensure(rag_instance: RAGAnything):
+        """
+        جایگزینی _ensure_lightrag_initialized با نسخه‌ای که بعد از اجرا
+        role_llm_funcs را تزریق می‌کند. این کار را برای هر دو مسیر existing/new انجام می‌دهیم.
+        """
+        _orig = getattr(rag_instance, "_ensure_lightrag_initialized", None)
+        if _orig is None or not callable(_orig):
+            _logger.warning("⚠️  _ensure_lightrag_initialized پیدا نشد")
+            return
+
+        async def _patched(_o=_orig):
+            _result = await _o()
+            _inject_role_llm_funcs(rag_instance, getattr(rag_instance, "lightrag", None))
+            return _result
+
+        rag_instance._ensure_lightrag_initialized = _patched
+        _logger.info("🔧 _ensure_lightrag_initialized monkey-patched")
 
     if existing:
-        # بارگذاری LightRAG موجود — به تدریج پارامترها را امتحان می‌کنیم
+        # ── مسیر existing=True: LightRAG از storage بارگذاری می‌شود ──────────
         lightrag_instance = None
-        used_path = None
         for path_name, lg_kwargs in [
-            ("full (role_llm_funcs + chunk_size)", dict(
+            ("role_llm_funcs + chunk_size", dict(
                 working_dir=str(config.working_dir),
                 role_llm_funcs=role_llm_funcs,
                 embedding_func=embedding_service.get_embedding_func(),
@@ -676,7 +715,6 @@ async def create_rag(config: Config, embedding_service: EmbeddingService) -> RAG
         ]:
             try:
                 lightrag_instance = LightRAG(**lg_kwargs)
-                used_path = path_name
                 _logger.info(f"✅ LightRAG init path: {path_name}")
                 break
             except TypeError as e:
@@ -686,29 +724,11 @@ async def create_rag(config: Config, embedding_service: EmbeddingService) -> RAG
         if lightrag_instance is None:
             raise RuntimeError("ساخت LightRAG با هیچ‌یک از پیکربندی‌ها ممکن نشد")
 
-        # ── FIX: تزریق role_llm_funcs به __dict__ ──────────────────────────
-        # raganything از self.lightrag.__dict__ (نه _build_global_config) به عنوان
-        # global_config به extract_entities و merge_nodes_and_edges پاس میده.
-        # اما role_llm_funcs فقط داخل _build_global_config ساخته میشه — نه در __dict__.
-        # راه‌حل: مقدار نهایی role_llm_funcs رو مستقیم به instance اضافه کنیم.
-        if hasattr(lightrag_instance, "_build_global_config"):
-            _gc = lightrag_instance._build_global_config()
-            _computed_rlf = _gc.get("role_llm_funcs")
-        else:
-            _computed_rlf = None
-
-        if _computed_rlf:
-            # نمی‌توانیم مستقیم assign کنیم چون property است (no setter)
-            # اما راه‌حل: مستقیم در __dict__ می‌نویسیم تا raganything پیداش کنه
-            lightrag_instance.__dict__["role_llm_funcs"] = _computed_rlf
-            _logger.info(f"✅ role_llm_funcs injected into lightrag.__dict__: {list(_computed_rlf.keys())}")
-        else:
-            lightrag_instance.__dict__["role_llm_funcs"] = role_llm_funcs
-            _logger.warning("⚠️  role_llm_funcs از _build_global_config نامعتبر بود — fallback مستقیم")
-
-        # تشخیص وضعیت role_llm_funcs در instance
-        _role_states = getattr(lightrag_instance, "_role_llm_states", None)
-        _logger.info(f"🔍 LightRAG._role_llm_states: {list(_role_states.keys()) if _role_states else 'MISSING/EMPTY'}")
+        # تزریق اولیه به lightrag.__dict__
+        _inject_role_llm_funcs(None, lightrag_instance)  # فقط __dict__ بدون processors
+        lightrag_instance.__dict__["role_llm_funcs"] = role_llm_funcs  # direct fallback
+        _logger.info(f"✅ role_llm_funcs injected into lightrag.__dict__: {list(role_llm_funcs.keys())}")
+        _logger.info(f"🔍 LightRAG._role_llm_states: {list(getattr(lightrag_instance, '_role_llm_states', {}).keys()) or 'MISSING/EMPTY'}")
         _logger.info(f"🔍 lightrag_kwargs keys: {list(lightrag_kwargs.keys())}")
 
         await lightrag_instance.initialize_storages()
@@ -730,21 +750,8 @@ async def create_rag(config: Config, embedding_service: EmbeddingService) -> RAG
                 lightrag_kwargs=lightrag_kwargs,
             )
 
-        # ── FIX 2: patch global_config روی هر modal processor ──────────────
-        # BaseModalProcessor.__init__ از asdict(lightrag) برای global_config استفاده می‌کند.
-        # asdict فقط dataclass fields رو می‌گیره، نه @property ها.
-        # پس role_llm_funcs که property است داخل global_config نیست → KeyError.
-        # راه‌حل: مستقیم به dict هر processor تزریق می‌کنیم.
-        _rlf_to_inject = lightrag_instance.__dict__.get("role_llm_funcs") or role_llm_funcs
-        _patched = 0
-        modal_processors = getattr(rag, "modal_processors", None) or {}
-        for _pname, _proc in modal_processors.items():
-            _gc = getattr(_proc, "global_config", None)
-            if isinstance(_gc, dict) and "role_llm_funcs" not in _gc:
-                _gc["role_llm_funcs"] = _rlf_to_inject
-                _patched += 1
-        if _patched:
-            _logger.info(f"✅ role_llm_funcs injected into {_patched} modal processor global_configs")
+        # monkey-patch برای تزریق بعد از هر _ensure_lightrag_initialized
+        _patch_ensure(rag)
 
         # تست سریع قبل از پردازش اصلی
         _logger.info("🧪 تست سریع pipeline قبل از پردازش...")
@@ -753,8 +760,9 @@ async def create_rag(config: Config, embedding_service: EmbeddingService) -> RAG
             _logger.info("✅ تست pre-flight موفق بود")
         except Exception as e:
             _logger.error(f"❌ تست pre-flight ناموفق: {e}\n{traceback.format_exc()}")
+
     else:
-        # ساخت RAGAnything جدید — RAGAnything خودش LightRAG را درون خودش می‌سازد
+        # ── مسیر existing=False: RAGAnything خودش LightRAG را می‌سازد ─────────
         try:
             rag = RAGAnything(
                 config=rag_cfg,
@@ -771,44 +779,8 @@ async def create_rag(config: Config, embedding_service: EmbeddingService) -> RAG
                 embedding_func=embedding_service.get_embedding_func(),
             )
 
-        # ── FIX: تزریق role_llm_funcs بعد از init (existing=False) ──────────
-        # RAGAnything از _ensure_lightrag_initialized برای ساخت LightRAG استفاده می‌کند.
-        # چون role_llm_funcs را در constructor نمی‌توان پاس داد، بعد از init تزریق می‌کنیم.
-        _orig_ensure = getattr(rag, "_ensure_lightrag_initialized", None)
-        if _orig_ensure is not None and callable(_orig_ensure):
-            async def _patched_ensure(_orig=_orig_ensure):
-                # CRITICAL: نتیجه تابع اصلی را برمی‌گردانیم.
-                # raganything انتظار dict {"success": True} دارد؛ اگر None برگردانیم
-                # → "LightRAG initialization failed: unknown error".
-                _result = await _orig()
-                lg = getattr(rag, "lightrag", None)
-                if lg is not None:
-                    # محاسبه role_llm_funcs از _build_global_config یا fallback
-                    if hasattr(lg, "_build_global_config"):
-                        try:
-                            _rlf = lg._build_global_config().get("role_llm_funcs") or role_llm_funcs
-                        except Exception:
-                            _rlf = role_llm_funcs
-                    else:
-                        _rlf = role_llm_funcs
-                    # تزریق به __dict__ (نه property — چون setter ندارد)
-                    lg.__dict__["role_llm_funcs"] = _rlf
-                    _logger.info(f"✅ [new] role_llm_funcs injected into lightrag.__dict__: {list(_rlf.keys())}")
-                    # تزریق به global_config هر modal processor
-                    _patched = 0
-                    for _pname, _proc in (getattr(rag, "modal_processors", None) or {}).items():
-                        _gc = getattr(_proc, "global_config", None)
-                        if isinstance(_gc, dict):
-                            _gc["role_llm_funcs"] = _rlf
-                            _patched += 1
-                    if _patched:
-                        _logger.info(f"✅ [new] role_llm_funcs injected into {_patched} modal processor global_configs")
-                return _result
-
-            rag._ensure_lightrag_initialized = _patched_ensure
-            _logger.info("🔧 _ensure_lightrag_initialized monkey-patched برای تزریق role_llm_funcs")
-        else:
-            _logger.warning("⚠️  _ensure_lightrag_initialized پیدا نشد — ممکن است role_llm_funcs تزریق نشود")
+        # monkey-patch برای تزریق بعد از هر _ensure_lightrag_initialized
+        _patch_ensure(rag)
 
     return rag
 
