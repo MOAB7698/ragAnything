@@ -93,6 +93,9 @@ class Config:
     llm_temperature: float = 0.2
     llm_max_tokens: int = 4096
     llm_timeout: int = 300
+    # اندازه chunk متن برای استخراج entity — کوچکتر = کمتر از context رد میشه
+    llm_chunk_token_size: int = 512
+    llm_chunk_overlap_token_size: int = 50
 
     # Embedding
     embedding_model: str = "intfloat/multilingual-e5-large"
@@ -583,6 +586,8 @@ async def create_rag(config: Config, embedding_service: EmbeddingService) -> RAG
     # و RAGAnything آن را مستقیم به LightRAG می‌دهد
     lightrag_kwargs: Dict[str, Any] = {
         "role_llm_funcs": role_llm_funcs,
+        "chunk_token_size": config.llm_chunk_token_size,
+        "chunk_overlap_token_size": config.llm_chunk_overlap_token_size,
     }
 
     # اگر storage موجود باشد، LightRAG را مستقیم بارگذاری می‌کنیم
@@ -595,6 +600,8 @@ async def create_rag(config: Config, embedding_service: EmbeddingService) -> RAG
                 working_dir=str(config.working_dir),
                 role_llm_funcs=role_llm_funcs,
                 embedding_func=embedding_service.get_embedding_func(),
+                chunk_token_size=config.llm_chunk_token_size,
+                chunk_overlap_token_size=config.llm_chunk_overlap_token_size,
             )
         except TypeError:
             # نسخه‌ای از LightRAG که role_llm_funcs ندارد
@@ -602,6 +609,8 @@ async def create_rag(config: Config, embedding_service: EmbeddingService) -> RAG
                 working_dir=str(config.working_dir),
                 llm_model_func=_llm,
                 embedding_func=embedding_service.get_embedding_func(),
+                chunk_token_size=config.llm_chunk_token_size,
+                chunk_overlap_token_size=config.llm_chunk_overlap_token_size,
             )
             lightrag_kwargs = {}  # نسخه قدیمی نیازی ندارد
 
