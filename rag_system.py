@@ -700,11 +700,12 @@ async def create_rag(config: Config, embedding_service: EmbeddingService) -> RAG
             _computed_rlf = None
 
         if _computed_rlf:
-            lightrag_instance.role_llm_funcs = _computed_rlf
+            # نمی‌توانیم مستقیم assign کنیم چون property است (no setter)
+            # اما راه‌حل: مستقیم در __dict__ می‌نویسیم تا raganything پیداش کنه
+            lightrag_instance.__dict__["role_llm_funcs"] = _computed_rlf
             _logger.info(f"✅ role_llm_funcs injected into lightrag.__dict__: {list(_computed_rlf.keys())}")
         else:
-            # fallback: مستقیم از role_llm_funcs که ساختیم استفاده کن
-            lightrag_instance.role_llm_funcs = role_llm_funcs
+            lightrag_instance.__dict__["role_llm_funcs"] = role_llm_funcs
             _logger.warning("⚠️  role_llm_funcs از _build_global_config نامعتبر بود — fallback مستقیم")
 
         # تشخیص وضعیت role_llm_funcs در instance
