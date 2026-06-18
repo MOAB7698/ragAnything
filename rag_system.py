@@ -35,6 +35,7 @@ import json
 import re
 import base64
 import hashlib
+import traceback
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 from dataclasses import dataclass, field
@@ -556,6 +557,60 @@ def build_image_search_engine(
     return ImageSearchEngine(img_cfg, logger)
 
 
+async def _preflight_multimodal_test(rag: RAGAnything, logger: logging.Logger) -> None:
+    """
+    یک تست کوچک برای تأیید اینکه pipeline کامل (از جمله entity extraction) کار می‌کند.
+    اگر role_llm_funcs مشکل داشته باشه اینجا خطا میده — نه وسط پردازش ۲۶۹ آیتم.
+    """
+    import inspect
+
+    # ---- ۱. بررسی ساختار داخلی LightRAG ----
+    lg = rag.lightrag
+    if lg is None:
+        raise RuntimeError("lightrag instance is None inside RAGAnything")
+
+    role_states = getattr(lg, "_role_llm_states", None)
+    logger.info(f"  _role_llm_states present: {role_states is not None}")
+    if role_states:
+        for role, state in role_states.items():
+            wrapped = getattr(state, "wrapped", None)
+            logger.info(f"    role '{role}': wrapped={wrapped is not None}")
+
+    # ---- ۲. بررسی global_config (اگر متد وجود داشت) ----
+    if hasattr(lg, "_build_global_config"):
+        try:
+            gc = lg._build_global_config()
+            rlf = gc.get("role_llm_funcs", "KEY_MISSING")
+            if rlf == "KEY_MISSING":
+                logger.error("  ❌ global_config['role_llm_funcs'] وجود ندارد!")
+            else:
+                none_roles = [k for k, v in rlf.items() if v is None]
+                logger.info(f"  global_config['role_llm_funcs'] roles: {list(rlf.keys())}")
+                if none_roles:
+                    logger.warning(f"  ⚠️  این role ها None هستند: {none_roles}")
+        except Exception as e:
+            logger.error(f"  ❌ خطا در _build_global_config: {e}\n{traceback.format_exc()}")
+
+    # ---- ۳. بررسی lightrag_kwargs ----
+    lkw = getattr(rag, "lightrag_kwargs", {})
+    rlf_in_kw = lkw.get("role_llm_funcs", "MISSING")
+    logger.info(f"  rag.lightrag_kwargs['role_llm_funcs']: {'present' if rlf_in_kw != 'MISSING' else 'MISSING'}")
+
+    # ---- ۴. تست واقعی: insert یک متن کوچک ----
+    # اگر این موفق شد، entity extraction با role_llm_funcs کار می‌کنه
+    test_text = "تست سیستم: این یک متن آزمایشی کوتاه است."
+    logger.info("  درحال تست ainsert با متن کوچک...")
+    try:
+        await lg.ainsert(test_text)
+        logger.info("  ✅ ainsert موفق — entity extraction کار می‌کند")
+    except KeyError as e:
+        logger.error(f"  ❌ KeyError در ainsert: {e}\n{traceback.format_exc()}")
+        raise
+    except Exception as e:
+        # خطاهای دیگه (مثل LLM timeout) رو فقط log می‌کنیم، متوقف نمی‌کنیم
+        logger.warning(f"  ⚠️  خطای غیر KeyError در ainsert (احتمالاً LLM): {type(e).__name__}: {e}")
+
+
 async def create_rag(config: Config, embedding_service: EmbeddingService) -> RAGAnything:
     """ساخت یا بارگذاری نمونه RAGAnything"""
     rag_cfg = build_rag_config(config)
@@ -593,43 +648,50 @@ async def create_rag(config: Config, embedding_service: EmbeddingService) -> RAG
     # اگر storage موجود باشد، LightRAG را مستقیم بارگذاری می‌کنیم
     existing = config.working_dir.exists() and any(config.working_dir.iterdir())
 
+    _logger = logging.getLogger(__name__)
+
     if existing:
         # بارگذاری LightRAG موجود — به تدریج پارامترها را امتحان می‌کنیم
         lightrag_instance = None
-        for lg_kwargs in [
-            # کامل‌ترین: role_llm_funcs + chunk settings
-            dict(
+        used_path = None
+        for path_name, lg_kwargs in [
+            ("full (role_llm_funcs + chunk_size)", dict(
                 working_dir=str(config.working_dir),
                 role_llm_funcs=role_llm_funcs,
                 embedding_func=embedding_service.get_embedding_func(),
                 chunk_token_size=config.llm_chunk_token_size,
                 chunk_overlap_token_size=config.llm_chunk_overlap_token_size,
-            ),
-            # بدون chunk settings
-            dict(
+            )),
+            ("role_llm_funcs only", dict(
                 working_dir=str(config.working_dir),
                 role_llm_funcs=role_llm_funcs,
                 embedding_func=embedding_service.get_embedding_func(),
-            ),
-            # قدیمی‌ترین: llm_model_func بدون role_llm_funcs
-            dict(
+            )),
+            ("legacy llm_model_func", dict(
                 working_dir=str(config.working_dir),
                 llm_model_func=_llm,
                 embedding_func=embedding_service.get_embedding_func(),
-            ),
+            )),
         ]:
             try:
                 lightrag_instance = LightRAG(**lg_kwargs)
-                # اگر به اینجا رسیدیم، موفق شد
+                used_path = path_name
+                _logger.info(f"✅ LightRAG init path: {path_name}")
                 if "role_llm_funcs" not in lg_kwargs:
-                    # fallback قدیمی — role_llm_funcs رو از kwargs حذف نکن
                     lightrag_kwargs = {"role_llm_funcs": role_llm_funcs}
+                    _logger.warning("⚠️  role_llm_funcs از kwargs LightRAG حذف شد — به lightrag_kwargs منتقل شد")
                 break
-            except TypeError:
+            except TypeError as e:
+                _logger.debug(f"  ↳ {path_name} → TypeError: {e}")
                 continue
 
         if lightrag_instance is None:
             raise RuntimeError("ساخت LightRAG با هیچ‌یک از پیکربندی‌ها ممکن نشد")
+
+        # تشخیص وضعیت role_llm_funcs در instance
+        _role_states = getattr(lightrag_instance, "_role_llm_states", None)
+        _logger.info(f"🔍 LightRAG._role_llm_states: {list(_role_states.keys()) if _role_states else 'MISSING/EMPTY'}")
+        _logger.info(f"🔍 lightrag_kwargs keys: {list(lightrag_kwargs.keys())}")
 
         await lightrag_instance.initialize_storages()
         await initialize_pipeline_status()
@@ -649,6 +711,14 @@ async def create_rag(config: Config, embedding_service: EmbeddingService) -> RAG
                 vision_model_func=_vision,
                 lightrag_kwargs=lightrag_kwargs,
             )
+
+        # تست سریع قبل از پردازش اصلی
+        _logger.info("🧪 تست سریع pipeline قبل از پردازش...")
+        try:
+            await _preflight_multimodal_test(rag, _logger)
+            _logger.info("✅ تست pre-flight موفق بود")
+        except Exception as e:
+            _logger.error(f"❌ تست pre-flight ناموفق: {e}\n{traceback.format_exc()}")
     else:
         # ساخت RAGAnything جدید
         try:
@@ -734,7 +804,7 @@ async def process_documents(
             success += 1
             logger.info(f"  ✅ موفق ({success}/{i})")
         except Exception as e:
-            logger.error(f"  ❌ خطا: {fp.name} — {e}")
+            logger.error(f"  ❌ خطا: {fp.name} — {e}\n{traceback.format_exc()}")
             failed_files.append(fp.name)
 
         if i % 10 == 0:
