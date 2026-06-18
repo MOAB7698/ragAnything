@@ -688,6 +688,25 @@ async def create_rag(config: Config, embedding_service: EmbeddingService) -> RAG
         if lightrag_instance is None:
             raise RuntimeError("ساخت LightRAG با هیچ‌یک از پیکربندی‌ها ممکن نشد")
 
+        # ── FIX: تزریق role_llm_funcs به __dict__ ──────────────────────────
+        # raganything از self.lightrag.__dict__ (نه _build_global_config) به عنوان
+        # global_config به extract_entities و merge_nodes_and_edges پاس میده.
+        # اما role_llm_funcs فقط داخل _build_global_config ساخته میشه — نه در __dict__.
+        # راه‌حل: مقدار نهایی role_llm_funcs رو مستقیم به instance اضافه کنیم.
+        if hasattr(lightrag_instance, "_build_global_config"):
+            _gc = lightrag_instance._build_global_config()
+            _computed_rlf = _gc.get("role_llm_funcs")
+        else:
+            _computed_rlf = None
+
+        if _computed_rlf:
+            lightrag_instance.role_llm_funcs = _computed_rlf
+            _logger.info(f"✅ role_llm_funcs injected into lightrag.__dict__: {list(_computed_rlf.keys())}")
+        else:
+            # fallback: مستقیم از role_llm_funcs که ساختیم استفاده کن
+            lightrag_instance.role_llm_funcs = role_llm_funcs
+            _logger.warning("⚠️  role_llm_funcs از _build_global_config نامعتبر بود — fallback مستقیم")
+
         # تشخیص وضعیت role_llm_funcs در instance
         _role_states = getattr(lightrag_instance, "_role_llm_states", None)
         _logger.info(f"🔍 LightRAG._role_llm_states: {list(_role_states.keys()) if _role_states else 'MISSING/EMPTY'}")
