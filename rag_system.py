@@ -637,10 +637,10 @@ async def create_rag(config: Config, embedding_service: EmbeddingService) -> RAG
         "vlm":     _vision, # تحلیل تصویر
     }
 
-    # lightrag_kwargs به RAGAnything پاس داده می‌شود
-    # و RAGAnything آن را مستقیم به LightRAG می‌دهد
+    # lightrag_kwargs به RAGAnything پاس داده می‌شود.
+    # IMPORTANT: role_llm_funcs را اینجا نمی‌گذاریم چون LightRAG آن را در constructor
+    # نمی‌پذیرد (TypeError). تزریق role_llm_funcs بعد از init انجام می‌شود.
     lightrag_kwargs: Dict[str, Any] = {
-        "role_llm_funcs": role_llm_funcs,
         "chunk_token_size": config.llm_chunk_token_size,
         "chunk_overlap_token_size": config.llm_chunk_overlap_token_size,
     }
@@ -677,9 +677,6 @@ async def create_rag(config: Config, embedding_service: EmbeddingService) -> RAG
                 lightrag_instance = LightRAG(**lg_kwargs)
                 used_path = path_name
                 _logger.info(f"✅ LightRAG init path: {path_name}")
-                if "role_llm_funcs" not in lg_kwargs:
-                    lightrag_kwargs = {"role_llm_funcs": role_llm_funcs}
-                    _logger.warning("⚠️  role_llm_funcs از kwargs LightRAG حذف شد — به lightrag_kwargs منتقل شد")
                 break
             except TypeError as e:
                 _logger.debug(f"  ↳ {path_name} → TypeError: {e}")
@@ -756,7 +753,7 @@ async def create_rag(config: Config, embedding_service: EmbeddingService) -> RAG
         except Exception as e:
             _logger.error(f"❌ تست pre-flight ناموفق: {e}\n{traceback.format_exc()}")
     else:
-        # ساخت RAGAnything جدید
+        # ساخت RAGAnything جدید — RAGAnything خودش LightRAG را درون خودش می‌سازد
         try:
             rag = RAGAnything(
                 config=rag_cfg,
@@ -766,13 +763,48 @@ async def create_rag(config: Config, embedding_service: EmbeddingService) -> RAG
                 lightrag_kwargs=lightrag_kwargs,
             )
         except TypeError:
-            # اگر lightrag_kwargs پارامتر نداشت، بدون آن امتحان کن
             rag = RAGAnything(
                 config=rag_cfg,
                 llm_model_func=_llm,
                 vision_model_func=_vision,
                 embedding_func=embedding_service.get_embedding_func(),
             )
+
+        # ── FIX: تزریق role_llm_funcs بعد از init (existing=False) ──────────
+        # RAGAnything از _ensure_lightrag_initialized برای ساخت LightRAG استفاده می‌کند.
+        # چون role_llm_funcs را در constructor نمی‌توان پاس داد، بعد از init تزریق می‌کنیم.
+        _orig_ensure = getattr(rag, "_ensure_lightrag_initialized", None)
+        if _orig_ensure is not None and callable(_orig_ensure):
+            async def _patched_ensure(_orig=_orig_ensure):
+                await _orig()
+                lg = getattr(rag, "lightrag", None)
+                if lg is None:
+                    return
+                # محاسبه role_llm_funcs از _build_global_config یا fallback
+                if hasattr(lg, "_build_global_config"):
+                    try:
+                        _rlf = lg._build_global_config().get("role_llm_funcs") or role_llm_funcs
+                    except Exception:
+                        _rlf = role_llm_funcs
+                else:
+                    _rlf = role_llm_funcs
+                # تزریق به __dict__ (نه property — چون setter ندارد)
+                lg.__dict__["role_llm_funcs"] = _rlf
+                _logger.info(f"✅ [new] role_llm_funcs injected into lightrag.__dict__: {list(_rlf.keys())}")
+                # تزریق به global_config هر modal processor
+                _patched = 0
+                for _pname, _proc in (getattr(rag, "modal_processors", None) or {}).items():
+                    _gc = getattr(_proc, "global_config", None)
+                    if isinstance(_gc, dict):
+                        _gc["role_llm_funcs"] = _rlf
+                        _patched += 1
+                if _patched:
+                    _logger.info(f"✅ [new] role_llm_funcs injected into {_patched} modal processor global_configs")
+
+            rag._ensure_lightrag_initialized = _patched_ensure
+            _logger.info("🔧 _ensure_lightrag_initialized monkey-patched برای تزریق role_llm_funcs")
+        else:
+            _logger.warning("⚠️  _ensure_lightrag_initialized پیدا نشد — ممکن است role_llm_funcs تزریق نشود")
 
     return rag
 
