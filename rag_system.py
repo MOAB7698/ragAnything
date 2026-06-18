@@ -34,6 +34,7 @@ import logging
 import json
 import re
 import base64
+import hashlib
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 from dataclasses import dataclass, field
@@ -260,7 +261,7 @@ class ProcessedFilesCache:
 
     def __init__(self, db_path: Path):
         self.db_path = db_path
-        self._data: Dict[str, str] = {}
+        self._data: Dict[str, Any] = {}
         self._load()
 
     def _load(self):
@@ -274,17 +275,35 @@ class ProcessedFilesCache:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db_path.write_text(json.dumps(self._data, indent=2, ensure_ascii=False), encoding="utf-8")
 
+    @staticmethod
+    def _file_hash(file_path: Path) -> str:
+        """محاسبه MD5 فایل برای تشخیص تغییر محتوا (صرف‌نظر از mtime)"""
+        h = hashlib.md5()
+        with open(file_path, "rb") as f:
+            while chunk := f.read(65536):
+                h.update(chunk)
+        return h.hexdigest()
+
     def is_processed(self, file_path: Path) -> bool:
         key = str(file_path.resolve())
-        stored_mtime = self._data.get(key)
-        if stored_mtime is None:
+        stored = self._data.get(key)
+        if stored is None:
             return False
         current_mtime = str(file_path.stat().st_mtime)
-        return stored_mtime == current_mtime
+        if isinstance(stored, dict):
+            # فرمت جدید: اول mtime بررسی میشه (سریع)، اگر فرق داشت hash چک میشه
+            if stored.get("mtime") == current_mtime:
+                return True
+            return stored.get("hash") == self._file_hash(file_path)
+        # فرمت قدیمی (فقط mtime)
+        return stored == current_mtime
 
     def mark_processed(self, file_path: Path):
         key = str(file_path.resolve())
-        self._data[key] = str(file_path.stat().st_mtime)
+        self._data[key] = {
+            "mtime": str(file_path.stat().st_mtime),
+            "hash": self._file_hash(file_path),
+        }
         self._save()
 
     def remove(self, file_path: Path):
