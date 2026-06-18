@@ -637,10 +637,11 @@ async def create_rag(config: Config, embedding_service: EmbeddingService) -> RAG
         "vlm":     _vision, # تحلیل تصویر
     }
 
-    # lightrag_kwargs به RAGAnything پاس داده می‌شود.
-    # IMPORTANT: role_llm_funcs را اینجا نمی‌گذاریم چون LightRAG آن را در constructor
-    # نمی‌پذیرد (TypeError). تزریق role_llm_funcs بعد از init انجام می‌شود.
+    # lightrag_kwargs به RAGAnything پاس داده می‌شود و RAGAnything آن را به LightRAG constructor می‌دهد.
+    # llm_model_func باید اینجا باشد تا LightRAG بتواند LLM را initialize کند.
+    # role_llm_funcs را اینجا نمی‌گذاریم چون نسخه نصب‌شده LightRAG آن را در constructor نمی‌پذیرد.
     lightrag_kwargs: Dict[str, Any] = {
+        "llm_model_func": _llm,
         "chunk_token_size": config.llm_chunk_token_size,
         "chunk_overlap_token_size": config.llm_chunk_overlap_token_size,
     }
