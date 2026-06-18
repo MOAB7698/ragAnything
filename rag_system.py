@@ -608,12 +608,21 @@ async def create_rag(config: Config, embedding_service: EmbeddingService) -> RAG
         await lightrag_instance.initialize_storages()
         await initialize_pipeline_status()
 
-        rag = RAGAnything(
-            lightrag=lightrag_instance,
-            config=rag_cfg,
-            vision_model_func=_vision,
-            lightrag_kwargs=lightrag_kwargs,
-        )
+        try:
+            rag = RAGAnything(
+                lightrag=lightrag_instance,
+                config=rag_cfg,
+                llm_model_func=_llm,
+                vision_model_func=_vision,
+                lightrag_kwargs=lightrag_kwargs,
+            )
+        except TypeError:
+            rag = RAGAnything(
+                lightrag=lightrag_instance,
+                config=rag_cfg,
+                vision_model_func=_vision,
+                lightrag_kwargs=lightrag_kwargs,
+            )
     else:
         # ساخت RAGAnything جدید
         try:
