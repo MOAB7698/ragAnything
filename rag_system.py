@@ -594,25 +594,42 @@ async def create_rag(config: Config, embedding_service: EmbeddingService) -> RAG
     existing = config.working_dir.exists() and any(config.working_dir.iterdir())
 
     if existing:
-        # بارگذاری LightRAG موجود
-        try:
-            lightrag_instance = LightRAG(
+        # بارگذاری LightRAG موجود — به تدریج پارامترها را امتحان می‌کنیم
+        lightrag_instance = None
+        for lg_kwargs in [
+            # کامل‌ترین: role_llm_funcs + chunk settings
+            dict(
                 working_dir=str(config.working_dir),
                 role_llm_funcs=role_llm_funcs,
                 embedding_func=embedding_service.get_embedding_func(),
                 chunk_token_size=config.llm_chunk_token_size,
                 chunk_overlap_token_size=config.llm_chunk_overlap_token_size,
-            )
-        except TypeError:
-            # نسخه‌ای از LightRAG که role_llm_funcs ندارد
-            lightrag_instance = LightRAG(
+            ),
+            # بدون chunk settings
+            dict(
+                working_dir=str(config.working_dir),
+                role_llm_funcs=role_llm_funcs,
+                embedding_func=embedding_service.get_embedding_func(),
+            ),
+            # قدیمی‌ترین: llm_model_func بدون role_llm_funcs
+            dict(
                 working_dir=str(config.working_dir),
                 llm_model_func=_llm,
                 embedding_func=embedding_service.get_embedding_func(),
-                chunk_token_size=config.llm_chunk_token_size,
-                chunk_overlap_token_size=config.llm_chunk_overlap_token_size,
-            )
-            lightrag_kwargs = {}  # نسخه قدیمی نیازی ندارد
+            ),
+        ]:
+            try:
+                lightrag_instance = LightRAG(**lg_kwargs)
+                # اگر به اینجا رسیدیم، موفق شد
+                if "role_llm_funcs" not in lg_kwargs:
+                    # fallback قدیمی — role_llm_funcs رو از kwargs حذف نکن
+                    lightrag_kwargs = {"role_llm_funcs": role_llm_funcs}
+                break
+            except TypeError:
+                continue
+
+        if lightrag_instance is None:
+            raise RuntimeError("ساخت LightRAG با هیچ‌یک از پیکربندی‌ها ممکن نشد")
 
         await lightrag_instance.initialize_storages()
         await initialize_pipeline_status()
