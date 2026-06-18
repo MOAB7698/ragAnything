@@ -732,6 +732,22 @@ async def create_rag(config: Config, embedding_service: EmbeddingService) -> RAG
                 lightrag_kwargs=lightrag_kwargs,
             )
 
+        # ── FIX 2: patch global_config روی هر modal processor ──────────────
+        # BaseModalProcessor.__init__ از asdict(lightrag) برای global_config استفاده می‌کند.
+        # asdict فقط dataclass fields رو می‌گیره، نه @property ها.
+        # پس role_llm_funcs که property است داخل global_config نیست → KeyError.
+        # راه‌حل: مستقیم به dict هر processor تزریق می‌کنیم.
+        _rlf_to_inject = lightrag_instance.__dict__.get("role_llm_funcs") or role_llm_funcs
+        _patched = 0
+        modal_processors = getattr(rag, "modal_processors", None) or {}
+        for _pname, _proc in modal_processors.items():
+            _gc = getattr(_proc, "global_config", None)
+            if isinstance(_gc, dict) and "role_llm_funcs" not in _gc:
+                _gc["role_llm_funcs"] = _rlf_to_inject
+                _patched += 1
+        if _patched:
+            _logger.info(f"✅ role_llm_funcs injected into {_patched} modal processor global_configs")
+
         # تست سریع قبل از پردازش اصلی
         _logger.info("🧪 تست سریع pipeline قبل از پردازش...")
         try:
