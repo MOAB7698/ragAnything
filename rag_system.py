@@ -92,11 +92,11 @@ class Config:
     llm_api_url: str = "http://192.168.190.18:1234/v1/chat/completions"
     llm_model_name: str = "google/gemma-4-31b"
     llm_temperature: float = 0.2
-    llm_max_tokens: int = 4096
+    llm_max_tokens: int = 1024
     llm_timeout: int = 300
     # اندازه chunk متن برای استخراج entity — کوچکتر = کمتر از context رد میشه
-    llm_chunk_token_size: int = 512
-    llm_chunk_overlap_token_size: int = 50
+    llm_chunk_token_size: int = 300
+    llm_chunk_overlap_token_size: int = 30
 
     # Embedding
     embedding_model: str = "intfloat/multilingual-e5-large"
