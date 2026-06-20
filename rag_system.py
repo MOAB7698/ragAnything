@@ -137,23 +137,23 @@ class Config:
     )
     content_format: str = "minerU"
 
-    # جستجو
-    top_k: int = 40
-    chunk_top_k: int = 15
+    # جستجو — کاهش برای fit شدن در context window مدل (9472 توکن)
+    top_k: int = 10
+    chunk_top_k: int = 5
 
     # ── Query Enhancement ──────────────────────────────────────────
     # Multi-Query: بازنویسی سوال برای پوشش بیشتر embedding space
-    enable_multi_query: bool = True
-    multi_query_count: int = 3          # تعداد بازنویسی
+    enable_multi_query: bool = False
+    multi_query_count: int = 2
 
     # HyDE: ساخت متن فرضی و embed کردن آن برای جستجو
-    enable_hyde: bool = True
+    enable_hyde: bool = False
 
-    # Cross-Encoder Reranker: رتبه‌بندی دقیق نتایج
-    enable_reranker: bool = True
-    reranker_model: str = "BAAI/bge-reranker-v2-m3"   # multilingual
-    reranker_top_k: int = 5             # بعد از rerank چند نتیجه نگه داریم
-    reranker_score_threshold: float = -1.5   # زیر این → fallback به نتایج dense
+    # Cross-Encoder Reranker: غیرفعال — مدل تنظیم نشده
+    enable_reranker: bool = False
+    reranker_model: str = "BAAI/bge-reranker-v2-m3"
+    reranker_top_k: int = 5
+    reranker_score_threshold: float = -1.5
 
     # Intent Router: تشخیص نوع سوال (search | chat)
     enable_intent_router: bool = True
