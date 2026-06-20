@@ -633,6 +633,42 @@ async def create_rag(config: Config, embedding_service: EmbeddingService) -> RAG
         "vlm":     _vision,
     }
 
+    # ── DEFINITIVE FIX: patch extract_entities و merge_nodes_and_edges ──────
+    # raganything.modalprocessors از `from lightrag.operate import extract_entities`
+    # استفاده می‌کند — یک کپی محلی در module namespace. برای جلوگیری دائمی از
+    # KeyError: 'role_llm_funcs'، این کپی محلی را patch می‌کنیم تا هر بار که
+    # global_config فاقد role_llm_funcs بود، خودش inject کند.
+    import raganything.modalprocessors as _mp_mod
+    from lightrag.operate import extract_entities as _orig_ee
+    from lightrag.operate import merge_nodes_and_edges as _orig_mne
+
+    if not getattr(_mp_mod, "_role_llm_funcs_patched", False):
+        async def _safe_extract_entities(chunks, global_config, **kw):
+            if "role_llm_funcs" not in global_config:
+                global_config = {**global_config, "role_llm_funcs": role_llm_funcs}
+            return await _orig_ee(chunks=chunks, global_config=global_config, **kw)
+
+        async def _safe_merge_nodes_and_edges(chunk_results, knowledge_graph_inst,
+                                               entity_vdb, relationships_vdb,
+                                               global_config, **kw):
+            if "role_llm_funcs" not in global_config:
+                global_config = {**global_config, "role_llm_funcs": role_llm_funcs}
+            return await _orig_mne(
+                chunk_results=chunk_results,
+                knowledge_graph_inst=knowledge_graph_inst,
+                entity_vdb=entity_vdb,
+                relationships_vdb=relationships_vdb,
+                global_config=global_config,
+                **kw
+            )
+
+        _mp_mod.extract_entities = _safe_extract_entities
+        _mp_mod.merge_nodes_and_edges = _safe_merge_nodes_and_edges
+        _mp_mod._role_llm_funcs_patched = True
+        logging.getLogger(__name__).info(
+            "✅ extract_entities و merge_nodes_and_edges در raganything.modalprocessors patch شدند"
+        )
+
     # lightrag_kwargs: فقط پارامترهایی که LightRAG constructor می‌پذیرد
     # role_llm_funcs اینجا نیست — بعد از init تزریق می‌شود
     lightrag_kwargs: Dict[str, Any] = {
